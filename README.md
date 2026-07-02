@@ -10,7 +10,7 @@ Upload a company's Annual Report or standalone BRSR PDF and instantly see:
 
 ## 🔗 Live Demo
 
-[Try it here](#) <!-- add your Streamlit Cloud link once deployed -->
+[Try it here](https://brsr-gap-analysis-tool-lhzxeq4qppvkst7wjgfn84.streamlit.app/)-- add your Streamlit Cloud link once deployed -->
 
 ## 🧠 How it works
 
