@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+*.pdf
+tata_steel_chunks.json
+tata_steel_extracted.json
+tata_steel_gap_analysis.json

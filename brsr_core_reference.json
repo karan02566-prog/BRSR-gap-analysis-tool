@@ -1,0 +1,50 @@
+{
+  "GHG Footprint": {
+    "principle": "Principle 6",
+    "keywords": ["scope 1", "scope 2", "scope 3", "ghg", "emission intensity", "emissions"]
+  },
+  "Water Footprint": {
+    "principle": "Principle 6",
+    "keywords": ["water withdrawal", "water discharge", "water consumption", "water intensity"]
+  },
+  "Energy Footprint": {
+    "principle": "Principle 6",
+    "keywords": ["energy consumption", "energy intensity", "renewable", "non-renewable"]
+  },
+  "Waste Management": {
+    "principle": "Principle 6",
+    "keywords": ["waste generated", "waste recycled", "waste disposed", "hazardous waste", "plastic waste", "e-waste"]
+  },
+  "Employment (Gender & Differently Abled)": {
+    "principle": "Principle 3",
+    "keywords": ["differently abled", "persons with disabilities", "female employees", "gender"]
+  },
+  "Employee Wellbeing & Safety": {
+    "principle": "Principle 3",
+    "keywords": ["lost time injury", "ltifr", "fatalities", "well-being", "wellbeing", "health and safety"]
+  },
+  "Gender Diversity (Pay & Leadership)": {
+    "principle": "Principle 5",
+    "keywords": ["gross wages", "median remuneration", "female", "gender pay"]
+  },
+  "Inclusive Development (Job Creation & CSR)": {
+    "principle": "Principle 8",
+    "keywords": ["csr", "aspirational district", "affirmative action", "rural", "job creation"]
+  },
+  "Business Openness (Related Party & Concentration)": {
+    "principle": "Principle 1",
+    "keywords": ["related party", "trading house", "top 10 dealers", "top 10 suppliers", "concentration"]
+  },
+  "Anti-Corruption & Integrity": {
+    "principle": "Principle 1",
+    "keywords": ["anti-corruption", "anti-bribery", "conflict of interest", "disciplinary action"]
+  },
+  "Consumer Responsibility (Data & Recalls)": {
+    "principle": "Principle 9",
+    "keywords": ["data breach", "cyber security", "product recall", "data privacy"]
+  },
+  "Public Policy Engagement": {
+    "principle": "Principle 7",
+    "keywords": ["trade and industry", "affiliations", "public policy advocacy", "anti-competitive"]
+  }
+}
