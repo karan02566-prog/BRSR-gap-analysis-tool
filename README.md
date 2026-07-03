@@ -55,7 +55,8 @@ It is designed as a **screening tool**, not a certification tool — it tells yo
 
 **Live app:** https://brsr-gap-analysis-tool-lhzxeq4qppvkst7wjgfn84.streamlit.app/
 
-*(Add a screenshot or short GIF of the dashboard here — this is the single highest-impact addition you can make to this README. A recruiter will look at the image before reading a single line of text.)*
+<img width="1906" height="885" alt="image" src="https://github.com/user-attachments/assets/e268298f-ce3c-4647-a0c6-5f0704650129" />
+
 
 ## Architecture
 
