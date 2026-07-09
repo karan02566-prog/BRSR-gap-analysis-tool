@@ -4,12 +4,19 @@ from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 import io
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.utils import get_column_letter
 import plotly.graph_objects as go
 import streamlit as st
 import pdfplumber
 import fitz
 import json
 import re
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.utils import get_column_letter
+from openpyxl.chart import BarChart, PieChart, Reference
 
 st.set_page_config(page_title="BRSR Gap Analysis Tool", layout="wide")
 st.markdown("""
@@ -207,6 +214,110 @@ def generate_pdf_report(results, overall_score, covered_count, partial_count, mi
     doc.build(elements)
     buffer.seek(0)
     return buffer
+def generate_excel_report(results, overall_score, covered_count, partial_count, missing_count, company_name="Company"):
+    wb = Workbook()
+
+    # ---------- Sheet 1: Summary ----------
+    summary_sheet = wb.active
+    summary_sheet.title = "Summary"
+
+    summary_sheet["A1"] = "BRSR Core Gap Analysis Report"
+    summary_sheet["A1"].font = Font(size=16, bold=True, color="2ECC71")
+    summary_sheet["A2"] = f"Company: {company_name}"
+    summary_sheet["A2"].font = Font(size=11, italic=True)
+
+    summary_sheet["A4"] = "Overall BRSR Core Score"
+    summary_sheet["B4"] = f"{overall_score}%"
+    summary_sheet["A5"] = "Covered"
+    summary_sheet["B5"] = covered_count
+    summary_sheet["A6"] = "Partial"
+    summary_sheet["B6"] = partial_count
+    summary_sheet["A7"] = "Missing"
+    summary_sheet["B7"] = missing_count
+
+    for row in range(4, 8):
+        summary_sheet[f"A{row}"].font = Font(bold=True)
+        # ---------- Pie chart: Covered / Partial / Missing ----------
+    pie = PieChart()
+    pie.title = "Status Breakdown"
+
+    labels = Reference(summary_sheet, min_col=1, min_row=5, max_row=7)   # A5:A7 -> "Covered","Partial","Missing"
+    data = Reference(summary_sheet, min_col=2, min_row=5, max_row=7)     # B5:B7 -> the actual counts
+
+    pie.add_data(data, titles_from_data=False)
+    pie.set_categories(labels)
+    pie.height = 8
+    pie.width = 12
+
+    summary_sheet.add_chart(pie, "D4")
+
+    summary_sheet.column_dimensions["A"].width = 28
+    summary_sheet.column_dimensions["B"].width = 15
+
+    # ---------- Sheet 2: Detailed Gaps ----------
+    detail_sheet = wb.create_sheet("Detailed Gaps")
+
+    headers = ["Attribute", "Principle", "Status", "Match %"]
+    detail_sheet.append(headers)
+
+    # Style the header row
+    header_fill = PatternFill(start_color="2ECC71", end_color="2ECC71", fill_type="solid")
+    for col_num, header in enumerate(headers, 1):
+        cell = detail_sheet.cell(row=1, column=col_num)
+        cell.fill = header_fill
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center")
+
+    # Color fills for status
+    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
+    # Write each row of results
+    for r in results:
+        status_clean = r["Status"].replace("✅ ", "").replace("🟡 ", "").replace("🔴 ", "")
+        row_data = [r["Attribute"], r["Principle"], status_clean, r["Match %"]]
+        detail_sheet.append(row_data)
+
+        current_row = detail_sheet.max_row
+        status_cell = detail_sheet.cell(row=current_row, column=3)
+
+        if "Covered" in status_clean and "Partially" not in status_clean:
+            status_cell.fill = green_fill
+        elif "Partially" in status_clean:
+            status_cell.fill = yellow_fill
+        else:
+            status_cell.fill = red_fill
+
+    # Auto-width columns
+    for col_num, header in enumerate(headers, 1):
+        max_len = max(
+            [len(str(header))] + [len(str(r.get(header, ""))) for r in results]
+        ) + 4
+        detail_sheet.column_dimensions[get_column_letter(col_num)].width = max_len
+        # ---------- Bar chart: Match % by Attribute ----------
+    bar = BarChart()
+    bar.type = "bar"          # horizontal bars, matches your Streamlit chart
+    bar.title = "Coverage by Attribute"
+    bar.x_axis.title = "Match %"
+
+    last_row = detail_sheet.max_row  # last row of actual data (11 attributes + header)
+
+    cats = Reference(detail_sheet, min_col=1, min_row=2, max_row=last_row)   # Attribute column, skip header
+    vals = Reference(detail_sheet, min_col=4, min_row=1, max_row=last_row)   # Match % column, include header for series name
+
+    bar.add_data(vals, titles_from_data=True)
+    bar.set_categories(cats)
+    bar.height = 10
+    bar.width = 20
+
+    detail_sheet.add_chart(bar, "F2")
+
+    # ---------- Save to memory, not disk ----------
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 
 # --- Streamlit UI ---
@@ -320,33 +431,142 @@ if uploaded_file is not None:
             st.plotly_chart(fig_bar, use_container_width=True)
 
             st.subheader("Attribute Comparison (Radar)")
-            fig_radar = go.Figure(data=go.Scatterpolar(
+
+            benchmark_values = [80] * len(attr_names)  # SEBI reasonable-assurance target line
+
+            fig_radar = go.Figure()
+
+            fig_radar.add_trace(go.Scatterpolar(
                 r=match_pcts + [match_pcts[0]],
                 theta=attr_names + [attr_names[0]],
                 fill='toself',
-                line=dict(color="#3498db")
+                name=uploaded_file.name.replace(".pdf", ""),
+                line=dict(color="#3498db"),
+                fillcolor="rgba(52, 152, 219, 0.4)"
             ))
+
+            fig_radar.add_trace(go.Scatterpolar(
+                r=benchmark_values + [benchmark_values[0]],
+                theta=attr_names + [attr_names[0]],
+                name="Target Benchmark (80%)",
+                line=dict(color="#2ecc71", dash="dash"),
+                fill=None
+            ))
+
             fig_radar.update_layout(
                 polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-                showlegend=False,
-                margin=dict(t=30, b=30, l=60, r=60),
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=-0.15),
+                margin=dict(t=30, b=60, l=60, r=60),
                 height=500
             )
             st.plotly_chart(fig_radar, use_container_width=True)
+            st.subheader("🌐 Principle → Attribute Breakdown (Sunburst)")
+
+            sunburst_ids = ["BRSR Core"]
+            sunburst_labels = ["BRSR Core"]
+            sunburst_parents = [""]
+            sunburst_values = [0]
+            sunburst_colors = ["#1a1f2b"]
+
+            principles = sorted(set(r["Principle"] for r in results))
+            for p in principles:
+                sunburst_ids.append(p)
+                sunburst_labels.append(p)
+                sunburst_parents.append("BRSR Core")
+                sunburst_values.append(0)
+                sunburst_colors.append("#3498db")
+
+            for r in results:
+                sunburst_ids.append(r["Attribute"])
+                sunburst_labels.append(r["Attribute"])
+                sunburst_parents.append(r["Principle"])
+                sunburst_values.append(r["Match %"] if r["Match %"] > 0 else 1)
+                if r["Status"] == "✅ Covered":
+                    sunburst_colors.append("#2ecc71")
+                elif r["Status"] == "🟡 Partially Covered":
+                    sunburst_colors.append("#f1c40f")
+                else:
+                    sunburst_colors.append("#e74c3c")
+
+    
+
+            fig_sunburst = go.Figure(go.Sunburst(
+                ids=sunburst_ids,
+                labels=sunburst_labels,
+                parents=sunburst_parents,
+                values=sunburst_values,
+                branchvalues="remainder",
+                marker=dict(colors=sunburst_colors),
+                hovertemplate='<b>%{label}</b><br>Match: %{value}%<extra></extra>'
+            ))
+            fig_sunburst.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=550)
+            st.plotly_chart(fig_sunburst, use_container_width=True)
+            st.subheader("🔲 Quick Status Grid")
+
+            import math
+            cols_per_row = 4
+            rows_needed = math.ceil(len(results) / cols_per_row)
+
+            status_color_map = {
+                "✅ Covered": "#2ecc71",
+                "🟡 Partially Covered": "#f1c40f",
+                "🔴 Missing": "#e74c3c"
+            }
+
+            grid_html = "<div style='display:grid; grid-template-columns: repeat(4, 1fr); gap: 10px;'>"
+            for r in results:
+                color = status_color_map[r["Status"]]
+                tile = (
+                    f"<div style='background-color:{color}; border-radius:10px; padding:14px; text-align:center;'>"
+                    f"<div style='font-size:13px; font-weight:600; color:#0d1117;'>{r['Attribute']}</div>"
+                    f"<div style='font-size:20px; font-weight:800; color:#0d1117;'>{r['Match %']}%</div>"
+                    f"</div>"
+                )
+                grid_html += tile
+            grid_html += "</div>"
+
+            st.markdown(grid_html, unsafe_allow_html=True)
 
             st.divider()
 
             st.subheader("📄 Detailed Attribute Coverage")
-            st.table(results)
 
+            all_principles = ["All Principles"] + sorted(set(r["Principle"] for r in results))
+            selected_principle = st.selectbox("🔍 Drill down by Principle", all_principles)
+
+            if selected_principle == "All Principles":
+                filtered_results = results
+            else:
+                filtered_results = [r for r in results if r["Principle"] == selected_principle]
+
+            st.table(filtered_results)
+            if selected_principle != "All Principles":
+                sel_scores = [r["Match %"] for r in filtered_results]
+                sel_avg = round(sum(sel_scores) / len(sel_scores), 1)
+                st.info(f"**{selected_principle}** average coverage: **{sel_avg}%** across {len(filtered_results)} attributes")
             # --- Downloadable PDF Report ---
             pdf_buffer = generate_pdf_report(
                 results, overall_score, covered_count, partial_count, missing_count,
                 company_name=uploaded_file.name.replace(".pdf", "")
             )
-            st.download_button(
-                label="📥 Download PDF Report",
-                data=pdf_buffer,
-                file_name=f"BRSR_Gap_Analysis_{uploaded_file.name.replace('.pdf', '')}.pdf",
-                mime="application/pdf"
+            excel_buffer = generate_excel_report(
+                results, overall_score, covered_count, partial_count, missing_count,
+                company_name=uploaded_file.name.replace(".pdf", "")
             )
+
+            dl_col1, dl_col2 = st.columns(2)
+            with dl_col1:
+                st.download_button(
+                    label="📥 Download PDF Report",
+                    data=pdf_buffer,
+                    file_name=f"BRSR_Gap_Analysis_{uploaded_file.name.replace('.pdf', '')}.pdf",
+                    mime="application/pdf"
+                )
+            with dl_col2:
+                st.download_button(
+                    label="📊 Download Excel Report",
+                    data=excel_buffer,
+                    file_name=f"BRSR_Gap_Analysis_{uploaded_file.name.replace('.pdf', '')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
