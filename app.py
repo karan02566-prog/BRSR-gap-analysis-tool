@@ -13,6 +13,7 @@ import pdfplumber
 import fitz
 import json
 import re
+import anthropic
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
@@ -88,16 +89,106 @@ with st.sidebar:
         "4. View results as charts, tables, or a downloadable report"
     )
     st.divider()
+    st.subheader("🤖 AI Narratives (optional)")
+    _existing_key = st.secrets.get("ANTHROPIC_API_KEY", None) if hasattr(st, "secrets") else None
+    if _existing_key:
+        st.caption("Anthropic API key loaded from app secrets.")
+    else:
+        st.text_input(
+            "Anthropic API key",
+            type="password",
+            key="anthropic_api_key",
+            help="Needed only for AI-generated compliance gap narratives. Not stored anywhere."
+        )
+    st.divider()
     st.markdown(
         "Built by **Karan Thakur** · "
         "[GitHub](https://github.com/karan02566-prog) · "
         "[LinkedIn](https://www.linkedin.com/in/karan-thakur-3486b538a/)"
     )
 
-st.title("📊 BRSR Gap Analysis Tool")
-st.markdown(
-    "##### Instantly check any Indian company's sustainability disclosures against SEBI's BRSR Core framework"
-)
+st.markdown("""
+<style>
+    .hero-box {
+        background: linear-gradient(135deg, #0d1f14, #0a1a25);
+        border: 1px solid #2a3f2f;
+        border-radius: 16px;
+        padding: 32px 36px;
+        margin-bottom: 24px;
+    }
+    .hero-badge {
+        display: inline-block;
+        background: rgba(46, 204, 113, 0.15);
+        color: #2ecc71;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        padding: 5px 12px;
+        border-radius: 20px;
+        margin-bottom: 14px;
+        text-transform: uppercase;
+    }
+    .hero-title {
+        font-size: 34px;
+        font-weight: 800;
+        line-height: 1.25;
+        margin: 0 0 12px 0;
+        background: linear-gradient(90deg, #ffffff, #2ecc71);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+    .hero-sub {
+        font-size: 15px;
+        color: #c9d1d9;
+        max-width: 720px;
+        line-height: 1.5;
+        margin: 0;
+    }
+</style>
+<div class="hero-box">
+    <span class="hero-badge">Built for auditors, analysts &amp; ESG reviewers</span>
+    <p class="hero-title">Check any listed company's BRSR filing against SEBI's Core checklist — with the evidence to prove it.</p>
+    <p class="hero-sub">
+        Upload a company's Annual Report or standalone BRSR PDF. This tool locates the Principle-wise
+        disclosure section, checks it against SEBI's 9 BRSR Core attributes requiring third-party assurance,
+        and shows you the exact sentence behind every match — including catching disclosures that
+        <i>mention</i> a metric but actually deny it (e.g. "no water recycling program"). No black-box scoring.
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+stat_col1, stat_col2, stat_col3 = st.columns(3)
+stat_col1.metric("BRSR Core attributes checked", "9")
+stat_col2.metric("Time to full analysis", "~30 sec")
+stat_col3.metric("Negation-aware matching", "Yes")
+
+with st.expander("📖 How the scoring works (methodology, for reviewers)"):
+    st.markdown("""
+**1. Section detection** — the tool scans the uploaded PDF for BRSR section markers
+("Section C: Principle Wise Performance", "Principle 1:" through "Principle 9:") and
+extracts the Principle-wise disclosure text using `pdfplumber`.
+
+**2. Keyword matching per attribute** — each of the 9 BRSR Core attributes has a defined
+set of keywords (e.g. *GHG Footprint* → `scope 1`, `scope 2`, `scope 3`, `ghg`, `emission intensity`).
+The full reference checklist is in `brsr_core_reference.json`, mapped to its BRSR Principle.
+
+**3. Negation check** — a raw keyword hit isn't enough. The tool splits the filing into
+sentences and checks the ~8 words before each keyword match for negation language
+("no", "not", "lack of", "excluding", "does not", etc.). A negated mention is
+excluded from coverage and flagged separately as evidence, not counted as a false positive.
+
+**4. Scoring** — coverage % = (keywords genuinely matched) ÷ (total keywords for that attribute).
+≥50% → ✅ Covered · >0% → 🟡 Partially Covered · 0% → 🔴 Missing.
+
+**5. Evidence** — every match (or negated non-match) links back to the actual sentence it
+came from, shown in the Detailed Coverage section below, so you can verify the score
+yourself rather than trusting a black box.
+
+*Limitations: this is a rule-based keyword/context matcher, not a semantic AI reader — it
+can still miss disclosures phrased with unlisted synonyms. Treat scores as a fast first-pass
+gap check, not a substitute for a manual audit.*
+""")
+
 st.write("")
 
 # --- Load the reference checklist (same one from Module 3) ---
@@ -149,11 +240,62 @@ def chunk_by_principle(extracted_pages):
     return chunks
 
 
+NEGATION_PATTERNS = [
+    r"\bno\b", r"\bnot\b", r"\bnone\b", r"\bnil\b", r"\bwithout\b",
+    r"\bn't\b", r"\bexcluding\b", r"\bexcludes\b", r"\babsence of\b",
+    r"\black of\b", r"\bdoes not\b", r"\bdid not\b", r"\bhas not\b",
+    r"\bhave not\b", r"\bhas no\b", r"\bhave no\b", r"\bnot applicable\b",
+    r"\bnot yet\b", r"\bnot been\b", r"\bunable to\b", r"\bfailed to\b"
+]
+NEGATION_REGEX = re.compile("|".join(NEGATION_PATTERNS), re.IGNORECASE)
+
+
+def split_sentences(text):
+    """Rough sentence splitter — good enough for BRSR-style disclosure prose."""
+    text = re.sub(r"\s+", " ", text)
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", text)
+    return [s.strip() for s in sentences if s.strip()]
+
+
+def find_keyword_evidence(sentences, keyword):
+    """Find sentences containing keyword; flag as negated if a negation word
+    appears within ~8 words before the keyword in that sentence."""
+    hits = []
+    kw_lower = keyword.lower()
+    for sentence in sentences:
+        s_lower = sentence.lower()
+        idx = s_lower.find(kw_lower)
+        if idx == -1:
+            continue
+        window_start = max(0, idx - 60)  # ~8-10 words of lookback
+        window = s_lower[window_start:idx]
+        is_negated = bool(NEGATION_REGEX.search(window))
+        hits.append({"sentence": sentence.strip(), "negated": is_negated})
+    return hits
+
+
 def run_gap_analysis(all_text):
+    sentences = split_sentences(all_text)
     all_text_lower = all_text.lower()
     results = []
     for attribute, details in REFERENCE.items():
-        matched_keywords = [kw for kw in details["keywords"] if kw in all_text_lower]
+        matched_keywords = []
+        missing_keywords = []
+        evidence = {}
+        for kw in details["keywords"]:
+            if kw not in all_text_lower:
+                missing_keywords.append(kw)
+                continue
+            hits = find_keyword_evidence(sentences, kw)
+            positive_hits = [h for h in hits if not h["negated"]]
+            if positive_hits:
+                matched_keywords.append(kw)
+                evidence[kw] = positive_hits[0]["sentence"]
+            else:
+                # keyword exists in text but every occurrence was negated
+                missing_keywords.append(kw)
+                if hits:
+                    evidence[kw] = hits[0]["sentence"]  # keep as "negated evidence" for transparency
         coverage = len(matched_keywords) / len(details["keywords"])
         if coverage >= 0.5:
             status = "✅ Covered"
@@ -165,12 +307,53 @@ def run_gap_analysis(all_text):
             "Attribute": attribute,
             "Principle": details["principle"],
             "Status": status,
-            "Match %": round(coverage * 100, 1)
+            "Match %": round(coverage * 100, 1),
+            "Matched Keywords": matched_keywords,
+            "Missing Keywords": missing_keywords,
+            "Evidence": evidence
         })
     return results
 
 
-def generate_pdf_report(results, overall_score, covered_count, partial_count, missing_count, company_name="Company"):
+def get_anthropic_client():
+    """Return an Anthropic client using an API key from secrets or sidebar input."""
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", None) if hasattr(st, "secrets") else None
+    if not api_key:
+        api_key = st.session_state.get("anthropic_api_key")
+    if not api_key:
+        return None
+    return anthropic.Anthropic(api_key=api_key)
+
+
+def generate_gap_narrative(client, attribute, principle, status, match_pct, matched_keywords, missing_keywords, company_name):
+    """Call Claude to produce a specific, auditor-style narrative for one BRSR Core attribute gap."""
+    prompt = f"""You are a BRSR (Business Responsibility and Sustainability Report) compliance analyst reviewing {company_name}'s disclosures against SEBI's BRSR Core requirements.
+
+Attribute: {attribute}
+Principle: {principle}
+Current status: {status} ({match_pct}% keyword coverage)
+Disclosure elements found: {", ".join(matched_keywords) if matched_keywords else "none"}
+Disclosure elements NOT found: {", ".join(missing_keywords) if missing_keywords else "none"}
+
+Write a short compliance gap narrative in exactly 3 parts, each 1-2 sentences, plain text (no markdown headers, no bullet symbols):
+1. What is missing or incomplete in the disclosure for this attribute.
+2. Why this matters for SEBI BRSR Core reasonable assurance requirements.
+3. A specific, actionable recommendation for what the company should disclose next reporting cycle to close the gap.
+
+Keep the entire response under 120 words. Be specific to the attribute, not generic."""
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=350,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        return f"⚠️ Could not generate narrative: {e}"
+
+
+def generate_pdf_report(results, overall_score, covered_count, partial_count, missing_count, company_name="Company", narratives=None):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
@@ -210,6 +393,22 @@ def generate_pdf_report(results, overall_score, covered_count, partial_count, mi
         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]))
     elements.append(table)
+
+    if narratives:
+        elements.append(Spacer(1, 24))
+        elements.append(Paragraph("AI-Generated Compliance Gap Narratives", styles["Heading2"]))
+        elements.append(Spacer(1, 10))
+        narrative_style = ParagraphStyle(
+            "NarrativeStyle", parent=styles["Normal"], spaceAfter=14
+        )
+        heading_style = ParagraphStyle(
+            "NarrativeHeading", parent=styles["Heading3"], textColor=colors.HexColor("#2ecc71")
+        )
+        for r in results:
+            text = narratives.get(r["Attribute"])
+            if text:
+                elements.append(Paragraph(f"{r['Attribute']} ({r['Principle']})", heading_style))
+                elements.append(Paragraph(text.replace("\n", "<br/>"), narrative_style))
 
     doc.build(elements)
     buffer.seek(0)
@@ -540,15 +739,96 @@ if uploaded_file is not None:
             else:
                 filtered_results = [r for r in results if r["Principle"] == selected_principle]
 
-            st.table(filtered_results)
+            table_view = [
+                {
+                    "Attribute": r["Attribute"],
+                    "Principle": r["Principle"],
+                    "Status": r["Status"],
+                    "Match %": r["Match %"]
+                }
+                for r in filtered_results
+            ]
+            st.table(table_view)
+
+            st.markdown("**🔎 Evidence — the actual sentence behind each match**")
+            st.caption(
+                "Keywords found in the filing are shown with the sentence they came from. "
+                "If a keyword appears only in a negated context (e.g. \"no water recycling\"), "
+                "it's counted as a gap, not a match — shown here so you can verify it yourself."
+            )
+            for r in filtered_results:
+                if not r["Evidence"]:
+                    continue
+                with st.expander(f"{r['Status']} · {r['Attribute']} — evidence"):
+                    for kw in r["Matched Keywords"]:
+                        sentence = r["Evidence"].get(kw)
+                        if sentence:
+                            st.markdown(f"✅ **`{kw}`** — _{sentence}_")
+                    for kw in r["Missing Keywords"]:
+                        sentence = r["Evidence"].get(kw)
+                        if sentence:
+                            st.markdown(f"🚫 **`{kw}`** — found only in negated context — _{sentence}_")
+
             if selected_principle != "All Principles":
                 sel_scores = [r["Match %"] for r in filtered_results]
                 sel_avg = round(sum(sel_scores) / len(sel_scores), 1)
                 st.info(f"**{selected_principle}** average coverage: **{sel_avg}%** across {len(filtered_results)} attributes")
+            st.divider()
+
+            # --- AI-Generated Compliance Gap Narratives ---
+            st.subheader("🤖 AI Compliance Gap Narratives")
+            st.caption(
+                "For each Partial or Missing attribute, generate a specific auditor-style "
+                "narrative: what's missing, why SEBI cares, and what to disclose next cycle."
+            )
+
+            gap_results = [r for r in results if r["Status"] != "✅ Covered"]
+
+            if not gap_results:
+                st.success("No gaps detected — every BRSR Core attribute is covered. Nothing to narrate.")
+            else:
+                narrative_key = f"narratives_{uploaded_file.name}"
+                if narrative_key not in st.session_state:
+                    st.session_state[narrative_key] = {}
+
+                if st.button(f"✨ Generate narratives for {len(gap_results)} gap(s)"):
+                    client = get_anthropic_client()
+                    if client is None:
+                        st.warning(
+                            "Add your Anthropic API key in the sidebar under 'AI Narratives' to use this feature."
+                        )
+                    else:
+                        progress = st.progress(0.0, text="Generating narratives...")
+                        for i, r in enumerate(gap_results):
+                            narrative = generate_gap_narrative(
+                                client,
+                                attribute=r["Attribute"],
+                                principle=r["Principle"],
+                                status=r["Status"].replace("🟡 ", "").replace("🔴 ", ""),
+                                match_pct=r["Match %"],
+                                matched_keywords=r["Matched Keywords"],
+                                missing_keywords=r["Missing Keywords"],
+                                company_name=uploaded_file.name.replace(".pdf", "")
+                            )
+                            st.session_state[narrative_key][r["Attribute"]] = narrative
+                            progress.progress((i + 1) / len(gap_results), text=f"Generated {i + 1}/{len(gap_results)}")
+                        progress.empty()
+
+                if st.session_state[narrative_key]:
+                    for r in gap_results:
+                        narrative = st.session_state[narrative_key].get(r["Attribute"])
+                        if narrative:
+                            with st.expander(f"{r['Status']} · {r['Attribute']} ({r['Principle']}) — {r['Match %']}%"):
+                                st.write(narrative)
+
+            st.divider()
+
             # --- Downloadable PDF Report ---
+            narrative_key = f"narratives_{uploaded_file.name}"
             pdf_buffer = generate_pdf_report(
                 results, overall_score, covered_count, partial_count, missing_count,
-                company_name=uploaded_file.name.replace(".pdf", "")
+                company_name=uploaded_file.name.replace(".pdf", ""),
+                narratives=st.session_state.get(narrative_key)
             )
             excel_buffer = generate_excel_report(
                 results, overall_score, covered_count, partial_count, missing_count,
